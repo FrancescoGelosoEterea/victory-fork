@@ -4,6 +4,54 @@ use anyhow::{Context, Result};
 
 use crate::{Console, Unimplemented};
 
+/// `VICTORY_PATCH=<rva>=<hex bytes>[:<expected hex bytes>],...`: bytes of the
+/// title's code replaced in the prepared copy (never in the title's files),
+/// each only where the original starts with the expected bytes when given.
+/// E.g. `0x28d0d60=31c0c3:ffc9f7c1` makes the function that says whether a
+/// story save is encrypted answer no (`xor eax, eax; ret`), so saves made
+/// without the console's keys load (and new ones are written plain).
+fn patch_code(prepared: &mut victory_loader::PreparedImage) -> Result<()> {
+    let Ok(spec) = std::env::var("VICTORY_PATCH") else {
+        return Ok(());
+    };
+    fn hex(s: &str) -> Result<Vec<u8>> {
+        anyhow::ensure!(s.len() % 2 == 0, "VICTORY_PATCH: odd number of hex digits in {s}");
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).with_context(|| format!("VICTORY_PATCH: bad hex {s}")))
+            .collect()
+    }
+    for item in spec.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        let (at, rest) = item.split_once('=').context("VICTORY_PATCH: an item is <rva>=<bytes>")?;
+        let rva = u32::from_str_radix(at.trim().trim_start_matches("0x"), 16)
+            .with_context(|| format!("VICTORY_PATCH: bad rva {at}"))?;
+        let (new, expected) = match rest.split_once(':') {
+            Some((n, e)) => (hex(n.trim())?, Some(hex(e.trim())?)),
+            None => (hex(rest.trim())?, None),
+        };
+        let off = prepared
+            .info
+            .rva_to_file_offset(rva)
+            .with_context(|| format!("VICTORY_PATCH: rva {rva:#x} has no bytes in the file"))? as usize;
+        let len = new.len().max(expected.as_ref().map_or(0, Vec::len));
+        let slot = prepared
+            .bytes
+            .get_mut(off..off + len)
+            .with_context(|| format!("VICTORY_PATCH: rva {rva:#x} runs past the image"))?;
+        if let Some(e) = &expected {
+            anyhow::ensure!(
+                slot.starts_with(e),
+                "VICTORY_PATCH: rva {rva:#x} holds {:02x?}, not {:02x?}; nothing patched",
+                &slot[..e.len()],
+                e
+            );
+        }
+        println!("patch          {rva:#x}: {:02x?} -> {:02x?}", &slot[..new.len()], new);
+        slot[..new.len()].copy_from_slice(&new);
+    }
+    Ok(())
+}
+
 #[cfg(windows)]
 pub fn run(
     exe: &Path,
@@ -20,7 +68,8 @@ pub fn run(
     victory_hle::modules::lifecycle::wait_for_previous();
     let cfg = victory_core::Config::load()?;
     let original = std::fs::read(exe).with_context(|| format!("reading {}", exe.display()))?;
-    let prepared = victory_loader::prepare(&original)?;
+    let mut prepared = victory_loader::prepare(&original)?;
+    patch_code(&mut prepared)?;
     let hash = prepared.original_hash.to_hex();
     match victory_game::identify(&hash) {
         Some(build) => println!("build          {} ({hash})", build.label),
