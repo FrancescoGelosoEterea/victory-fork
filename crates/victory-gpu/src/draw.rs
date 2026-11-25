@@ -1033,6 +1033,12 @@ impl State {
         if !self.bind(list, p, false) {
             return false;
         }
+        // The sky dome the ambient light follows (`crate::ambient`).
+        if p.stages.iter().any(|s| s.shader.draws_sky)
+            && let Some(&sky) = self.targets.first()
+        {
+            crate::ambient::sky_drawn(sky);
+        }
         let l = &list.list;
         // Vertex buffers the input layout reads.
         let mut views = [D3D12_VERTEX_BUFFER_VIEW::default(); 32];
@@ -2272,6 +2278,7 @@ impl State {
         // SAFETY: an open list with everything set.
         unsafe { list.list.Dispatch(x, y, z) };
         DISPATCHED.fetch_add(1, Ordering::Relaxed);
+        self.ambient(list, p);
     }
 
     /// What a draw or dispatch runs, for the device-removed report
@@ -2623,6 +2630,89 @@ impl State {
             let r = self.scissors.first().map_or([0; 4], |r| [r.left, r.top, r.right, r.bottom]);
             *census.1.entry(r).or_insert(0) += 1;
         }
+    }
+
+    /// After a dispatch of `p`: the least indirect light, if it is the
+    /// program that resolves that, or the reflections held to it, if it is
+    /// the one that writes them last (`crate::ambient`). The pass binds a
+    /// pipeline, a root signature and a heap of its own: the next draw or
+    /// dispatch sets the title's again.
+    fn ambient(&mut self, list: &HostList, p: &HostPipeline) {
+        if self.ambient_pass(list, p) {
+            self.host_pipeline = 0;
+            self.host_roots = [0; 2];
+            // Never the title's heaps, so that they are set again even when
+            // the title has none.
+            self.host_heaps = [usize::MAX; 2];
+        }
+    }
+
+    /// Records the ambient light's pass after a dispatch of `p`; whether
+    /// it did (ported from Belobug/VIctory-Belobug-AMD, `draw.rs`
+    /// `State::ambient`).
+    fn ambient_pass(&self, list: &HostList, p: &HostPipeline) -> bool {
+        let Some(stage) = p
+            .stages
+            .first()
+            .filter(|s| s.shader.resolves_light || s.shader.ends_reflections)
+        else {
+            return false;
+        };
+        // The view at a root table's place, as the title's table names it.
+        let view = |kind: ResourceType, (slot, offset): (u8, u32)| {
+            let u = stage.translated().used.iter().find(|u| {
+                u.kind == kind
+                    && u.root == RootType::Table
+                    && (u.slot, u.table_offset_dwords) == (slot, offset)
+            })?;
+            let Some(Root::Table(table)) = self.roots_ref(true).get(usize::from(u.slot)) else {
+                return None;
+            };
+            crate::descriptor::view(table + u64::from(u.table_offset_dwords) * 4)
+        };
+        // Diagnostics: what the first such program reads through its tables,
+        // to find the places again if another build of the title moves them.
+        #[cfg(feature = "diagnostics")]
+        {
+            static LISTED: std::sync::Once = std::sync::Once::new();
+            LISTED.call_once(|| {
+                for u in stage.translated().used.iter().filter(|u| u.root == RootType::Table) {
+                    let r = match view(u.kind, (u.slot, u.table_offset_dwords)) {
+                        Some(View::Shader(r, _)) | Some(View::Unordered(r, ..)) => r,
+                        _ => continue,
+                    };
+                    let Some(t) = crate::resource::host_resource(r as This) else { continue };
+                    // SAFETY: a live resource.
+                    let d = unsafe { t.GetDesc() };
+                    tracing::info!(
+                        kind = ?u.kind, slot = u.slot, offset = u.table_offset_dwords,
+                        format = d.Format.0, width = d.Width, height = d.Height,
+                        depth = d.DepthOrArraySize, flags = d.Flags.0,
+                        "the light resolve reads"
+                    );
+                }
+            });
+        }
+        if !stage.shader.resolves_light {
+            // The reflections, held to the light around.
+            return match view(ResourceType::Uav, crate::ambient::REFLECTIONS) {
+                Some(View::Unordered(r, ..)) if r != 0 => crate::ambient::hold(list, r as This),
+                _ => false,
+            };
+        }
+        let light = match view(ResourceType::Uav, crate::ambient::LIGHT) {
+            Some(View::Unordered(r, ..)) => r,
+            _ => 0,
+        };
+        if light == 0 {
+            once!("no ambient light: other tables");
+            return false;
+        }
+        let depth = match view(ResourceType::Srv, crate::ambient::DEPTH) {
+            Some(View::Shader(r, _)) => Some(r as This),
+            _ => None,
+        };
+        crate::ambient::raise(list, light as This, depth)
     }
 
     fn roots_ref(&self, compute: bool) -> &Vec<Root> {
@@ -3435,6 +3525,7 @@ impl State {
         // back (`crate::indirect`).
         if kind == DISPATCH {
             DISPATCHED.fetch_add(1, Ordering::Relaxed);
+            self.ambient(list, p);
         } else {
             DRAWN.fetch_add(1, Ordering::Relaxed);
         }

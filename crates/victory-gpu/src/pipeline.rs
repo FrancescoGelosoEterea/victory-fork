@@ -61,6 +61,16 @@ pub(crate) struct Shader {
     /// The first 8 bytes of its BLAKE3, as logged.
     pub(crate) hash: String,
     container: Vec<u8>,
+    /// Its result gets the least indirect light ([`crate::ambient`]).
+    #[cfg(windows)]
+    pub(crate) resolves_light: bool,
+    /// It draws the sky as the title reflects it ([`crate::ambient::SKY`]).
+    #[cfg(windows)]
+    pub(crate) draws_sky: bool,
+    /// It writes the title's reflections for the last time in a frame
+    /// ([`crate::ambient::REFLECTED`]).
+    #[cfg(windows)]
+    pub(crate) ends_reflections: bool,
     #[cfg(windows)]
     translated: OnceLock<Option<Translated>>,
     /// Whether its code walks the ray-tracing structures, once looked at
@@ -115,6 +125,14 @@ fn shader(stage: &'static str, bytes: &[u8]) -> Arc<Shader> {
                 stage,
                 hash: full.to_hex()[..16].to_owned(),
                 container: bytes.to_vec(),
+                // The programs the ambient light follows, by name (the
+                // container keeps its shader's name).
+                #[cfg(windows)]
+                resolves_light: names(bytes, crate::ambient::PROGRAM),
+                #[cfg(windows)]
+                draws_sky: names(bytes, crate::ambient::SKY),
+                #[cfg(windows)]
+                ends_reflections: names(bytes, crate::ambient::REFLECTED),
                 #[cfg(windows)]
                 translated: OnceLock::new(),
                 #[cfg(windows)]
@@ -122,6 +140,12 @@ fn shader(stage: &'static str, bytes: &[u8]) -> Arc<Shader> {
             })
         })
         .clone()
+}
+
+/// Whether `bytes` hold `name` anywhere.
+#[cfg(windows)]
+fn names(bytes: &[u8], name: &[u8]) -> bool {
+    bytes.windows(name.len()).any(|w| w == name)
 }
 
 /// A translated shader and the console resources its code reads.

@@ -6155,8 +6155,9 @@ impl HostList {
     /// Moves host texture `copy` to `wanted` (a host state) in this list,
     /// as [`HostList::transition`] does a title resource's host copy, and
     /// records the barrier: for textures that are not a title resource's
-    /// host copy (colour twins) and for the copies between the two.
-    fn settle(&self, copy: &std::sync::Arc<crate::resource::HostTexture>, wanted: u32) {
+    /// host copy (colour twins), for the copies between the two, and for a
+    /// copy held past its title resource (`crate::ambient`'s sky image).
+    pub(crate) fn settle(&self, copy: &std::sync::Arc<crate::resource::HostTexture>, wanted: u32) {
         let wanted = legal_state(&copy.texture, wanted);
         let mut states = self.states.lock().unwrap_or_else(|e| e.into_inner());
         let before = match states.entry(std::sync::Arc::as_ptr(copy) as usize) {
