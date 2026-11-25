@@ -48,6 +48,7 @@ cbuffer Record : register(b0) {
     // run is left empty and costs nothing. Bit 2: the records are gathered
     // (`gather`): record i lies in the source where word i of the table
     // behind `count_buf` says (from `count_offset` on), and goes to slot i.
+    // Bit 3: a dispatch record split at 65,535 groups in x (below).
     uint has_count;
     uint count_offset;
 };
@@ -131,9 +132,9 @@ void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
         if (g.z != 0 && g.x * g.y > GROUPS / g.z) {
             g = uint3(0, 0, 0);
         }
-        // Split (bit 2): the groups past 65,535 in x, up to 65,535 more, run
+        // Split (bit 3): the groups past 65,535 in x, up to 65,535 more, run
         // as a second record (below), charged with the first.
-        uint rest = ((has_count & 4u) != 0 && g.x == 65535u) ? min(src_args.Load(src_at) - 65535u, 65535u) : 0u;
+        uint rest = ((has_count & 8u) != 0 && g.x == 65535u) ? min(src_args.Load(src_at) - 65535u, 65535u) : 0u;
         if (rest != 0 && g.y * g.z != 0 && g.x + rest > GROUPS / (g.y * g.z)) {
             g = uint3(0, 0, 0);
             rest = 0;
@@ -225,7 +226,7 @@ void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
         }
         // Split: the second record, `records` records on, takes the groups
         // past 65,535 in x (none where the first is not full).
-        if (kind == 2 && (has_count & 4u) != 0) {
+        if (kind == 2 && (has_count & 8u) != 0) {
             uint rest = groups.x == 65535u ? min(src_args.Load(src_at) - 65535u, 65535u) : 0u;
             dst_args.Store3(records * stride + dst_at, uint3(rest, groups.yz));
         }
@@ -502,7 +503,7 @@ fn record_clamp_with(
         }
         None => (src_gpu, 0u32, 0u32),
     };
-    let flags = has_count | (u32::from(ahead) << 1) | (u32::from(split) << 2);
+    let flags = has_count | (u32::from(ahead) << 1) | (u32::from(split) << 3);
     let constants = [kind, stride, records, args_offset, flags, count_offset];
     // SAFETY: an open list; our root signature and pipeline; live source,
     // count, scratch destination, and budget buffers. `src` and `count` stay
