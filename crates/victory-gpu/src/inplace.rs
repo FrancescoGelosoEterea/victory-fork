@@ -228,7 +228,7 @@ fn place_stretch(start: u64, len: u64, section: usize, offset: u64) -> Option<Pl
     if cover((start - lead) as usize, bytes as usize) != Cover::Run(section, from) {
         return refused("its pages are not all of the run", None);
     }
-    let section_bytes = views().sections.iter().find(|s| s.0 == section)?.1;
+    let section_bytes = views_read().sections.iter().find(|s| s.0 == section)?.1;
     if from + bytes > section_bytes {
         return refused("past the section", None);
     }
